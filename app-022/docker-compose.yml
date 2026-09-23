@@ -1,0 +1,8 @@
+services:
+  app-022:
+    build: .
+    image: app-022-bugfix-13:latest
+    container_name: app-022-bugfix-13
+    ports:
+      - "8222:80"
+    restart: unless-stopped
