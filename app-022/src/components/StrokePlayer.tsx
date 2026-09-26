@@ -3,7 +3,7 @@
  * 已完成笔画灰色，当前笔画用 dashoffset 从 0 长度逐渐画出。
  * 支持播放/暂停/重置/上一笔/下一笔、点击步骤圆点跳转、Space/←/→ 键盘控制。
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { JSX, KeyboardEvent } from 'react';
 import { getStrokes } from '../lib/data';
 import { glyphTransform } from './paint';
@@ -29,10 +29,11 @@ type Props = {
 export function StrokePlayer({ char, sizeMm = 40, autoPlay = false, speed = 400, compact = false }: Props): JSX.Element {
   const strokes = getStrokes(char);
   const total = strokes?.length ?? 0;
-  const [done, setDone] = useState(0); // 已完成笔画数（当前笔 = done，0 基索引）
+  const [done, setDone] = useState(0); // 已完整画完的笔画数；当前动画笔 = done，取值 0..total（total 表示全部写完）
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0); // 当前笔 0..1
   const pathRefs = useRef<(SVGPathElement | null)[]>([]);
+  const [lens, setLens] = useState<number[]>([]);
   const rafRef = useRef(0);
   const startRef = useRef(0);
 
@@ -40,15 +41,45 @@ export function StrokePlayer({ char, sizeMm = 40, autoPlay = false, speed = 400,
   useEffect(() => {
     setDone(0);
     setProgress(0);
+    setLens([]);
     setPlaying(autoPlay && total > 0);
   }, [char, autoPlay, total]);
 
-  // rAF 动画循环
+  // 已挂载的 path 在浏览器绘制前测量长度，避免新笔首帧拿不到长度而闪现整笔
+  useLayoutEffect(() => {
+    setLens((prev) => {
+      let changed = false;
+      const next = [...prev];
+      for (let i = 0; i <= Math.min(done, total - 1); i++) {
+        const len = pathRefs.current[i]?.getTotalLength() ?? 0;
+        if (len > 0 && next[i] !== len) {
+          next[i] = len;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [done, playing, total, char]);
+
+  // rAF 动画循环：当前笔画完（progress 到 1）后推进到下一笔，最后一笔画完自动停止
   useEffect(() => {
     if (!playing) return;
     startRef.current = performance.now();
     const tick = (now: number) => {
-      setProgress((now - startRef.current) / speed);
+      const elapsed = now - startRef.current;
+      if (elapsed >= speed) {
+        setProgress(1);
+        if (done + 1 >= total) {
+          setDone(total); // 全部写完：done === total
+          setPlaying(false);
+        } else {
+          // effect 依赖 done，会随重渲染重启并把起点重置为当前时刻，下一笔从头画
+          setProgress(0);
+          setDone(done + 1);
+        }
+        return; // 状态更新会重渲染并重启本 effect，不再续帧
+      }
+      setProgress(elapsed / speed);
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
@@ -57,24 +88,36 @@ export function StrokePlayer({ char, sizeMm = 40, autoPlay = false, speed = 400,
   }, [playing, done, speed, total]);
 
   const reset = useCallback(() => {
+    setPlaying(false);
     setDone(0);
     setProgress(0);
   }, []);
 
   const prev = useCallback(() => {
-    setDone((d) => d - 1);
+    setPlaying(false);
+    setDone((d) => Math.max(0, d - 1));
     setProgress(0);
   }, []);
 
   const next = useCallback(() => {
-    setDone((d) => d + 1);
+    setPlaying(false);
+    setDone((d) => Math.min(total, d + 1));
     setProgress(0);
-  }, []);
+  }, [total]);
 
   const toggle = useCallback(() => {
     if (total === 0) return;
-    setPlaying((p) => !p);
-  }, [total]);
+    if (playing) {
+      setPlaying(false);
+      return;
+    }
+    // 已停在最后一笔（或越位）：再点播放从头开始
+    if (done >= total) {
+      setDone(0);
+      setProgress(0);
+    }
+    setPlaying(true);
+  }, [total, playing, done]);
 
   // 键盘：Space 播放/暂停，← 上一笔，→ 下一笔
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -98,7 +141,7 @@ export function StrokePlayer({ char, sizeMm = 40, autoPlay = false, speed = 400,
     );
   }
 
-  const curLen = pathRefs.current[done]?.getTotalLength() ?? 0;
+  const curLen = done < total ? lens[done] ?? 0 : 0;
 
   return (
     <div className="player" data-testid="stroke-player" tabIndex={0} onKeyDown={onKeyDown}>
